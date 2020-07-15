@@ -1,3 +1,7 @@
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
 import string
 import random
 from collections import Counter
@@ -23,6 +27,7 @@ from helper_rank import helper_rank_func
 from majority_vote import majority_vote_func
 from scipy import stats
 from scipy.optimize import minimize
+from sklearn import svm
 from sklearn.cluster import MeanShift, estimate_bandwidth
 from sklearn.datasets import make_regression
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
@@ -30,6 +35,7 @@ from sklearn.feature_selection import SelectKBest, mutual_info_regression
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import *
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras import layers
 from tensorflow.keras.models import load_model
 from tensorflow.keras.wrappers.scikit_learn import KerasClassifier, KerasRegressor
@@ -49,10 +55,15 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     
     # Function to normalise aray
     def normalise(array):
-        return (array - array.min()) / (array.max() - array.min())
+        return ((array - array.min()) / (array.max() - array.min()))
     
     # normalise actual coefficient so it can be compared to predicted coef
     scaled_coef = normalise(coef)
+    
+    # normalise features
+    scaler = MinMaxScaler(feature_range=(-1,1))
+    scaler.fit(features)
+    features = scaler.transform(features)
     
     # give features alphabetical name
     
@@ -71,61 +82,84 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     # split data to train-test split
     X_train, X_test, y_train, y_test = train_test_split(features, output, test_size=0.2, shuffle=True)
     
+    ###############################################################
     # fit random forest
-    rf_regr = RandomForestRegressor(max_depth=7, n_estimators=700)
+    ###############################################################
+    rf_regr = RandomForestRegressor(max_depth=10, n_estimators=1000)
     rf_regr.fit(X_train, y_train)
     rf_predicted = rf_regr.predict(X_test)
     
     # model error
     rf_mae = np.abs(rf_predicted - y_test).mean()
+    rf_rmse = np.sqrt(np.square(rf_predicted - y_test).mean())
     print(f"predicted_shape:{rf_predicted.shape} y_test shape:{y_test.shape}")
     print(f"rf_mae:{rf_mae}")
+    print(f"rf_rmse:{rf_rmse}")
     
-    # permutation importance for random forest
-    pi_result_rf = permutation_importance(rf_regr, X_test, y_test, n_repeats=10, scoring=mae_scorer)
-    pi_result_rf_scaled = normalise(pi_result_rf.importances_mean)
-    pos = np.arange(column_names.size)
-#     plt.figure(figsize=(15, 10))
-#     plt.bar(pos, pi_result_rf_scaled, align="center", alpha=0.5, label="RF")
-#     plt.bar(pos, scaled_coef, align="center", alpha=0.5, label="actual")
-#     plt.xticks(pos, column_names)
-#     plt.title("RF Permutation Importances (test set)")
-#     plt.legend(loc="best")
-#     plt.show()
+    
+
+    ###############################################################
     # fit gradient boosted tree
-    gb_regr = GradientBoostingRegressor(max_depth=7, n_estimators=700)
+    ###############################################################
+    gb_regr = GradientBoostingRegressor(max_depth=10, n_estimators=1000)
     gb_regr.fit(X_train, y_train)
     gb_predicted = gb_regr.predict(X_test)
     
     # model error
     gb_mae = np.abs(gb_predicted - y_test).mean()
+    gb_rmse = np.sqrt(np.square(gb_predicted - y_test).mean())
     print(f"predicted_shape:{gb_predicted.shape} y_test shape:{y_test.shape}")
-    print(f"rf_mae:{gb_mae}")
+    print(f"gb_mae:{gb_mae}")
+    print(f"gb_rmse:{gb_rmse}")
+    
+    
+    ################################################################
+    # fit support vector regressor
+    ###############################################################
+    svr_regr = svm.SVR(kernel='linear', C=2048, epsilon=0.5, gamma=1e-07)
+    svr_regr.fit(X_train, y_train)
+    svr_predicted = svr_regr.predict(X_test)
+    
+    svr_mae = np.abs(svr_predicted - y_test).mean()
+    svr_rmse = np.sqrt(np.square(svr_predicted - y_test).mean())
+    print(f"predicted_shape:{svr_predicted.shape} y_test shape:{y_test.shape}")
+    print(f"svr_mae:{svr_mae}")
+    print(f"svr_rmse:{svr_rmse}")
+    
+
+    
+    ################################################################
+    # permutation importance for rf, gb, and svr
+    ################################################################
+    pi_result_rf = permutation_importance(rf_regr, X_test, y_test, n_repeats=10, scoring=mae_scorer)
+    pi_result_rf_scaled = normalise(pi_result_rf.importances_mean)
+    pos = np.arange(column_names.size)
     
     # permutation importance for gradient boosted tree
     pi_result_gb = permutation_importance(gb_regr, X_test, y_test, n_repeats=10, scoring=mae_scorer)
-    
     pi_result_gb_scaled = normalise(pi_result_gb.importances_mean)
-    pos = np.arange(column_names.size)
-#     plt.figure(figsize=(15, 10))
-#     plt.bar(pos, pi_result_gb_scaled, align="center", alpha=0.5, label="GB")
-#     plt.bar(pos, scaled_coef, align="center", alpha=0.5, label="actual")
-#     plt.xticks(pos, column_names)
-#     plt.title("GB Permutation Importances (test set)")
-#     # plt.xticks(rotation=90)
-#     plt.legend(loc="best")
-#     plt.show()
     
-    # SHAP for rf and gb
+    # permutation importance for svr
+    pi_result_svr = permutation_importance(svr_regr, X_test, y_test, n_repeats=10, scoring=mae_scorer)
+    pi_result_svr_scaled = normalise(pi_result_svr.importances_mean)
+    
+    ################################################################
+    # SHAP for rf, gb, and svr
+    ################################################################
     explainer_rf = shap.TreeExplainer(rf_regr)
-    shap_values_rf = explainer_rf.shap_values(df_features)
+    shap_values_rf = explainer_rf.shap_values(X_test)
 
     explainer_gb = shap.TreeExplainer(gb_regr)
-    shap_values_gb = explainer_gb.shap_values(df_features)
+    shap_values_gb = explainer_gb.shap_values(X_test)
+    
+    
+    explainer_svr = shap.KernelExplainer(svr_regr.predict, data=shap.kmeans(X_test, 10))
+    shap_values_svr = explainer_svr.shap_values(X_test, nsamples=200, l1_reg=f"num_features({NUM_FEATS})")
+    
 
     gb_sv_scaled = normalise(np.abs(shap_values_gb).mean(0))
     rf_sv_scaled = normalise(np.abs(shap_values_rf).mean(0))
-    
+    svr_sv_scaled = normalise(np.abs(shap_values_svr).mean(0))
     ############################################################################
     ## DNN
     ############################################################################
@@ -133,22 +167,22 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
         def __init__(self):
             super().__init__()
             self.linear5 = nn.Linear(NUM_FEATS, 64)
-            self.relu5 = nn.Tanh()
+            self.relu5 = nn.ReLU()
 
             self.linear6 = nn.Linear(64, 32)
-            self.relu6 = nn.Tanh()
+            self.relu6 = nn.ReLU()
 
             self.linear7 = nn.Linear(32, 16)
-            self.relu7 = nn.Tanh()
+            self.relu7 = nn.ReLU()
 
             self.linear8 = nn.Linear(16, 8)
-            self.relu8 = nn.Tanh()
+            self.relu8 = nn.ReLU()
 
             self.linear9 = nn.Linear(8, 6)
-            self.relu9 = nn.Tanh()
+            self.relu9 = nn.ReLU()
 
             self.linear10 = nn.Linear(6, 4)
-            self.relu10 = nn.Tanh()
+            self.relu10 = nn.ReLU()
 
             self.linear11 = nn.Linear(4, 1)
             # self.relu11 = nn.ReLU()
@@ -214,7 +248,10 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     test_input_tensor = torch.from_numpy(X_test).type(torch.FloatTensor)
     test_output = net(test_input_tensor).detach().numpy()
     print(f"predicted_shape:{test_output.shape} y_test shape:{y_test.shape}")
-    print("dnn_mae:", (np.abs(test_output - y_test)).mean())
+    dnn_mae = (np.abs(test_output - y_test)).mean()
+    dnn_rmse = np.sqrt(np.square(test_output - y_test).mean())
+    print(f"dnn_mae: {dnn_mae}")
+    print(f"dnn_rmse: {dnn_rmse}")
     # Intergrated gradient
     ig = IntegratedGradients(net)
     test_input_tensor = torch.from_numpy(X_train).type(torch.FloatTensor)
@@ -224,27 +261,6 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
 
     feature_names = list(column_names)
     dnn_ig_scaled = normalise(np.abs(np.mean(attr, axis=0)))
-    #print(f"DNN IG error: {np.abs(dnn_ig_scaled - scaled_coef).mean()}")
-#     def visualize_importances(
-#         feature_names,
-#         importances,
-#         title="Intergrated Gradient Average Feature Importances",
-#         plot=True,
-#         axis_title="Features",
-#     ):
-#         print(title)
-#         for i in range(len(feature_names)):
-#             print(feature_names[i], ": ", "%.3f" % (importances[i]))
-#         x_pos = np.arange(len(feature_names))
-#         if plot:
-#             plt.figure(figsize=(12, 6))
-#             plt.bar(x_pos, importances, align="center")
-#             plt.xticks(x_pos, feature_names, wrap=False)
-#             plt.xlabel(axis_title)
-#             plt.title(title)
-
-
-#     visualize_importances(column_names, np.mean(attr, axis=0))
 
     def base_model():
         model = tf.keras.Sequential(
@@ -252,12 +268,12 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
                 layers.Dense(
                     64, activation="tanh", input_shape=(X_train.shape[1],), bias_regularizer=tf.keras.regularizers.l2(0.01),
                 ),
-                layers.Dense(64, activation="tanh", bias_regularizer=tf.keras.regularizers.l2(0.01)),
-                layers.Dense(32, activation="tanh", bias_regularizer=tf.keras.regularizers.l2(0.01)),
-                layers.Dense(16, activation="tanh", bias_regularizer=tf.keras.regularizers.l2(0.01)),
-                layers.Dense(8, activation="tanh", bias_regularizer=tf.keras.regularizers.l2(0.01)),
-                layers.Dense(6, activation="tanh", bias_regularizer=tf.keras.regularizers.l2(0.01)),
-                layers.Dense(4, activation="tanh", bias_regularizer=tf.keras.regularizers.l2(0.01)),
+                layers.Dense(64, activation="relu", bias_regularizer=tf.keras.regularizers.l2(0.01)),
+                layers.Dense(32, activation="relu", bias_regularizer=tf.keras.regularizers.l2(0.01)),
+                layers.Dense(16, activation="relu", bias_regularizer=tf.keras.regularizers.l2(0.01)),
+                layers.Dense(8, activation="relu", bias_regularizer=tf.keras.regularizers.l2(0.01)),
+                layers.Dense(6, activation="relu", bias_regularizer=tf.keras.regularizers.l2(0.01)),
+                layers.Dense(4, activation="relu", bias_regularizer=tf.keras.regularizers.l2(0.01)),
                 layers.Dense(1, activation="linear"),
             ]
         )
@@ -286,20 +302,27 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     history = dnn_model.fit(X_train, y_train)
     perm = PermutationImportance(dnn_model, scoring=mae_scorer).fit(X_train, y_train)
     dnn_pi_df = eli5.explain_weights_df(perm, feature_names=column_names.tolist())
-    dnn_pi_df.sort_values(by=["feature"], inplace=True)
+    dnn_pi_df['feature_cat'] = pd.Categorical(
+        dnn_pi_df['feature'], 
+        categories=column_names.tolist(), 
+        ordered=True)
+    dnn_pi_df.sort_values(by='feature_cat', inplace=True)
+    dnn_pi_df.drop(columns=['feature_cat'],inplace=True)
+    print(dnn_pi_df.head(20))
     dnn_pi_scaled = normalise(dnn_pi_df["weight"].values)
+    
     
     model = tf.keras.Sequential(
         [
             layers.Dense(
                 64, activation="tanh", input_shape=(X_train.shape[1],), bias_regularizer=tf.keras.regularizers.l2(0.01),
             ),
-            layers.Dense(64, activation="tanh", bias_regularizer=tf.keras.regularizers.l2(0.01)),
-            layers.Dense(32, activation="tanh", bias_regularizer=tf.keras.regularizers.l2(0.01)),
-            layers.Dense(16, activation="tanh", bias_regularizer=tf.keras.regularizers.l2(0.01)),
-            layers.Dense(8, activation="tanh", bias_regularizer=tf.keras.regularizers.l2(0.01)),
-            layers.Dense(6, activation="tanh", bias_regularizer=tf.keras.regularizers.l2(0.01)),
-            layers.Dense(4, activation="tanh", bias_regularizer=tf.keras.regularizers.l2(0.01)),
+            layers.Dense(64, activation="relu", bias_regularizer=tf.keras.regularizers.l2(0.01)),
+            layers.Dense(32, activation="relu", bias_regularizer=tf.keras.regularizers.l2(0.01)),
+            layers.Dense(16, activation="relu", bias_regularizer=tf.keras.regularizers.l2(0.01)),
+            layers.Dense(8, activation="relu", bias_regularizer=tf.keras.regularizers.l2(0.01)),
+            layers.Dense(6, activation="relu", bias_regularizer=tf.keras.regularizers.l2(0.01)),
+            layers.Dense(4, activation="relu", bias_regularizer=tf.keras.regularizers.l2(0.01)),
             layers.Dense(1, activation="linear"),
         ]
     )
@@ -324,14 +347,22 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
         X_train, y_train, epochs=1000, batch_size=32, verbose=0, validation_split=0.1, callbacks=[callback],
     )
     
+    
     # save keras model
     tf.keras.models.save_model(model, "dnn_model.h5")
     
-    # SHAP for DNN
-    explainer_dnn = shap.KernelExplainer(model.predict, data=shap.kmeans(df_features.iloc[:300, :], 10))
-    shap_values = explainer_dnn.shap_values(df_features.iloc[:300, :], nsamples=200, l1_reg=f"num_features({NUM_FEATS})")
+#     SHAP for DNN
+#     explainer_dnn = shap.KernelExplainer(model.predict, data=shap.kmeans(df_features.iloc[:300, :], 10))
+#     shap_values = explainer_dnn.shap_values(df_features.iloc[:300, :], nsamples=200, l1_reg=f"num_features({NUM_FEATS})")
+#     dnn_sv = np.sum(np.mean(np.abs(shap_values), axis=1), axis=0)
+#     dnn_sv_scaled = normalise(dnn_sv)
+    
+    
+    explainer_dnn = shap.KernelExplainer(model.predict, data=shap.kmeans(X_test, 10))
+    shap_values = explainer_dnn.shap_values(X_test, nsamples=200, l1_reg=f"num_features({NUM_FEATS})")
     dnn_sv = np.sum(np.mean(np.abs(shap_values), axis=1), axis=0)
     dnn_sv_scaled = normalise(dnn_sv)
+    
     
     
     # combine results into single array
@@ -339,9 +370,18 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     pi_result_rf_scaled_reshaped = np.reshape(pi_result_rf_scaled, (pi_result_rf_scaled.shape[0], 1))
     gb_sv_scaled_reshaped = np.reshape(gb_sv_scaled, (gb_sv_scaled.shape[0], 1))
     pi_result_gb_scaled_reshaped = np.reshape(pi_result_gb_scaled, (pi_result_gb_scaled.shape[0], 1))
+    
+    svr_sv_scaled_reshaped = np.reshape(svr_sv_scaled, (svr_sv_scaled.shape[0], 1))
+    pi_result_svr_scaled_reshaped = np.reshape(pi_result_svr_scaled, (pi_result_svr_scaled.shape[0], 1))
+    
     dnn_pi_scaled_reshaped = np.reshape(dnn_pi_scaled, (dnn_pi_scaled.shape[0], 1))
     dnn_sv_scaled_reshaped = np.reshape(dnn_sv_scaled, (dnn_sv_scaled.shape[0], 1))
     dnn_ig_scaled_reshaped = np.reshape(dnn_ig_scaled, (dnn_ig_scaled.shape[0], 1))
+    
+    def isNaN(num):
+        return num != num
+    if isNaN(dnn_ig_scaled_reshaped.mean()) == True:
+        dnn_ig_scaled_reshaped = (dnn_pi_scaled_reshaped+dnn_sv_scaled_reshaped)/2
 
     all_stacked = np.hstack(
         (
@@ -349,76 +389,87 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
             pi_result_rf_scaled_reshaped,
             gb_sv_scaled_reshaped,
             pi_result_gb_scaled_reshaped,
+            svr_sv_scaled_reshaped,
+            pi_result_svr_scaled_reshaped,
             dnn_pi_scaled_reshaped,
             dnn_sv_scaled_reshaped,
             dnn_ig_scaled_reshaped,
         )
     )
 
-    print(f"rf_sv:{rf_sv_scaled_reshaped}")
-    print("")
-    print(f"rf_pi:{pi_result_rf_scaled_reshaped}")
-    print("")
-    print(f"gb_sv:{gb_sv_scaled_reshaped}")
-    print("")
-    print(f"gb_pi:{pi_result_gb_scaled_reshaped}")
-    print("")
-    print(f"dnn_sv:{dnn_sv_scaled_reshaped}")
-    print("")
-    print(f"dnn_pi:{dnn_pi_scaled_reshaped}")
-    print("")
-    print(f"dnn_ig:{dnn_ig_scaled_reshaped}")
-    print("")
-    all_stacked_df = pd.DataFrame(all_stacked, columns=["rf_sv", "rf_pi", "gb_sv", "gb_pi", "dnn_pi", "dnn_sv", "dnn_ig"])
+
+    all_stacked_df = pd.DataFrame(all_stacked, columns=["rf_sv", "rf_pi", "gb_sv", "gb_pi","svr_sv", "svr_pi", "dnn_pi", "dnn_sv", "dnn_ig"])
 
     all_stacked_df.to_csv("all_stacked.csv")
     
-    print(f"RF PI error: {np.abs(pi_result_rf_scaled - scaled_coef).mean()}")
-    print(f"GB PI error: {np.abs(pi_result_gb_scaled - scaled_coef).mean()}")
-    print(f"DNN PI error: {np.abs(dnn_pi_scaled - scaled_coef).mean()}")
-    print(f"RF+GB+DNN PI error: {np.abs(((pi_result_gb_scaled+pi_result_rf_scaled+dnn_pi_scaled)/3) - scaled_coef).mean()}")
+    def err_calculation(predicted, actual, calc_type):
+        if calc_type=='mae':
+            return np.abs(predicted - actual).mean()
+        elif calc_type=='rmse':
+            return np.sqrt(np.square(predicted - actual).mean())
+        
+    
+    err_rf_pi = err_calculation(pi_result_rf_scaled, scaled_coef, 'mae')
+    err_gb_pi = err_calculation(pi_result_gb_scaled, scaled_coef, 'mae')
+    err_svr_pi = err_calculation(pi_result_svr_scaled, scaled_coef, 'mae')
+    err_dnn_pi = err_calculation(dnn_pi_scaled, scaled_coef, 'mae')
+    err_rf_sv = err_calculation(rf_sv_scaled, scaled_coef, 'mae')
+    err_gb_sv = err_calculation(gb_sv_scaled, scaled_coef, 'mae')
+    err_svr_sv = err_calculation(svr_sv_scaled, scaled_coef, 'mae')
+    err_dnn_sv = err_calculation(dnn_sv_scaled, scaled_coef, 'mae')
+    err_dnn_ig = err_calculation(dnn_ig_scaled, scaled_coef, 'mae')
+    
+    rmse_err_rf_pi = err_calculation(pi_result_rf_scaled, scaled_coef, 'rmse')
+    rmse_err_gb_pi = err_calculation(pi_result_gb_scaled, scaled_coef, 'rmse')
+    rmse_err_svr_pi = err_calculation(pi_result_svr_scaled, scaled_coef, 'rmse')
+    rmse_err_dnn_pi = err_calculation(dnn_pi_scaled, scaled_coef, 'rmse')
+    rmse_err_rf_sv = err_calculation(rf_sv_scaled, scaled_coef, 'rmse')
+    rmse_err_gb_sv = err_calculation(gb_sv_scaled, scaled_coef, 'rmse')
+    rmse_err_svr_sv = err_calculation(svr_sv_scaled, scaled_coef, 'rmse')
+    rmse_err_dnn_sv = err_calculation(dnn_sv_scaled, scaled_coef, 'rmse')
+    rmse_err_dnn_ig = err_calculation(dnn_ig_scaled, scaled_coef, 'rmse')
+    
+    print('MAE ERROR:')
+    print(f"RF PI MAE error: {err_rf_pi}")
+    print(f"GB PI MAE error: {err_gb_pi}")
+    print(f"SVR PI MAE error: {err_svr_pi}")
+    print(f"DNN PI MAE error: {err_dnn_pi}")
     print("")
-    print(f"RF SV error: {np.abs(rf_sv_scaled - scaled_coef).mean()}")
-    print(f"GB SV error: {np.abs(gb_sv_scaled - scaled_coef).mean()}")
-    print(f"DNN SV error: {np.abs(dnn_sv_scaled - scaled_coef).mean()}")
-    print(f"RF+GB+DNN SV error: {np.abs(((rf_sv_scaled+gb_sv_scaled+dnn_sv_scaled)/3) - scaled_coef).mean()}")
+    print(f"RF SV MAE error: {err_rf_sv}")
+    print(f"GB SV MAE error: {err_gb_sv}")
+    print(f"SVR SV MAE error: {err_svr_sv}")
+    print(f"DNN SV MAE error: {err_dnn_sv}")
+    print(f"DNN IG MAE error: {err_dnn_ig}")
     print("")
-    print(f"GB PI error: {np.abs(pi_result_gb_scaled - scaled_coef).mean()}")
-    print(f"GB SV error: {np.abs(gb_sv_scaled - scaled_coef).mean()}")
-    print(f"GB PI + GB SV error: {np.abs(((gb_sv_scaled+pi_result_gb_scaled)/2) - scaled_coef).mean()}")
+    print(f"PI MAE error: {(err_rf_pi+err_gb_pi+err_svr_pi+err_dnn_pi)/4}")
+    print(f"SV MAE error: {(err_rf_sv+err_gb_sv+err_svr_sv+err_dnn_sv)/4}")
+    print(f"IG MAE error: {err_dnn_ig}")
     print("")
-    print(f"RF PI error: {np.abs(pi_result_rf_scaled - scaled_coef).mean()}")
-    print(f"RF SV error: {np.abs(rf_sv_scaled - scaled_coef).mean()}")
-    print(f"RF PI + RF SV error: {np.abs(((rf_sv_scaled+pi_result_rf_scaled)/2) - scaled_coef).mean()}")
     print("")
-    print(f"DNN PI error: {np.abs(dnn_pi_scaled - scaled_coef).mean()}")
-    print(f"DNN SV error: {np.abs(dnn_sv_scaled - scaled_coef).mean()}")
-    print(f"DNN IG error: {np.abs(dnn_ig_scaled - scaled_coef).mean()}")
-    print(f"DNN PI + DNN SV + DNN IG error: {np.abs(((dnn_pi_scaled+dnn_sv_scaled+dnn_ig_scaled)/3) - scaled_coef).mean()}")
+    
+    print('RMSE ERROR:')
+    print(f"RF PI RMSE error: {rmse_err_rf_pi}")
+    print(f"GB PI RMSE error: {rmse_err_gb_pi}")
+    print(f"SVR PI RMSE error: {rmse_err_svr_pi}")
+    print(f"DNN PI RMSE error: {rmse_err_dnn_pi}")
     print("")
-
-    point_five = np.full((NUM_FEATS), 0.5)
-    zeros = np.full((NUM_FEATS), 0)
-    ones = np.full((NUM_FEATS), 1)
-    print(f"Dummy Average of 0.0 error: {np.abs(zeros - scaled_coef).mean()}")
-    print(f"Dummy Average of 0.5 error: {np.abs(point_five - scaled_coef).mean()}")
-    print(f"Dummy Average of 0.1 error: {np.abs(ones - scaled_coef).mean()}")
+    print(f"RF SV RMSE error: {rmse_err_rf_sv}")
+    print(f"GB SV RMSE error: {rmse_err_gb_sv}")
+    print(f"SVR SV RMSE error: {rmse_err_svr_sv}")
+    print(f"DNN SV RMSE error: {rmse_err_dnn_sv}")
+    print(f"DNN IG RMSE error: {rmse_err_dnn_ig}")
+    print("")
+    print(f"PI RMSE error: {(rmse_err_rf_pi+rmse_err_gb_pi+rmse_err_svr_pi+rmse_err_dnn_pi)/4}")
+    print(f"SV RMSE error: {(rmse_err_rf_sv+rmse_err_gb_sv+rmse_err_svr_sv+rmse_err_dnn_sv)/4}")
+    print(f"IG RMSE error: {rmse_err_dnn_ig}")
+    print("")
     print("")
     
     # median
     total_scaled_median = np.median(all_stacked, axis=1)
 
     # mean 
-    total_scaled_mean = (
-        rf_sv_scaled
-        + pi_result_rf_scaled
-        + gb_sv_scaled
-        + pi_result_gb_scaled
-        + dnn_pi_scaled
-        + dnn_sv_scaled
-        + dnn_ig_scaled
-    ) / 7
-
+    total_scaled_mean = np.mean(all_stacked, axis=1)
 
     # Box and whiskers
     total_scaled_box_whiskers = np.array([])
@@ -487,11 +538,11 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     total_scaled_majority_vote = majority_vote_func(all_stacked, NUM_FEATS)
 
     # kendall tau
-    columns_name = ["rf_sv", "rf_pi", "gb_sv", "gb_pi", "dnn_pi", "dnn_sv", "dnn_ig"]
-    total_scaled_kendall_tau, kendall_tau_p_value = helper_rank_func(stats.kendalltau, all_stacked, columns_name, NUM_FEATS)
+    columns_name = ["rf_sv", "rf_pi", "gb_sv", "gb_pi", "svr_sv", "svr_pi", "dnn_pi", "dnn_sv", "dnn_ig"]
+    total_scaled_kendall_tau, kendall_tau_p_value, non_sig_ratio = helper_rank_func(stats.kendalltau, all_stacked, columns_name, NUM_FEATS)
 
     # spearman
-    total_scaled_spearman, spearman_p_value = helper_rank_func(stats.spearmanr, all_stacked, columns_name, NUM_FEATS)
+    total_scaled_spearman, spearman_p_value, non_sig_ratio = helper_rank_func(stats.spearmanr, all_stacked, columns_name, NUM_FEATS)
 
     # convert signifance to true or false
     def plot_rank_method_significance(p_value, rank_name, sig_threshold, columns_name):
@@ -562,14 +613,58 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     ), f"Shape mismatch: Expect shape to be ({NUM_FEATS},) but receive {(total_scaled_spearman.shape)}"
 
     # Print all final result
-    print(f" All MAE (mean): {np.abs(total_scaled_mean - scaled_coef).mean()}")
-    print(f" All MAE (median): {np.abs(total_scaled_median - scaled_coef).mean()}")
-    print(f" All MAE (mode): {np.abs(total_scaled_mode - scaled_coef).mean()}")
-    print(f" All MAE (box-whiskers): {np.abs(total_scaled_box_whiskers - scaled_coef).mean()}")
-    print(f" All MAE (tau-test): {np.abs(total_scaled_tau_test - scaled_coef).mean()}")
-    print(f" All MAE (majority vote): {np.abs(total_scaled_majority_vote - scaled_coef).mean()}")
-    print(f" All MAE (Kendall tau): {np.abs(total_scaled_kendall_tau - scaled_coef).mean()}")
-    print(f" All MAE (Spearman Rho): {np.abs(total_scaled_spearman - scaled_coef).mean()}")
+    # mae 
+    err_mean = err_calculation(total_scaled_mean, scaled_coef, 'mae')
+    err_median = err_calculation(total_scaled_median, scaled_coef, 'mae')
+    err_mode = err_calculation(total_scaled_mode, scaled_coef, 'mae')
+    err_box = err_calculation(total_scaled_box_whiskers, scaled_coef, 'mae')
+    err_tau = err_calculation(total_scaled_tau_test, scaled_coef, 'mae')
+    err_major = err_calculation(total_scaled_majority_vote, scaled_coef, 'mae')
+    err_kendall = err_calculation(total_scaled_kendall_tau, scaled_coef, 'mae')
+    err_spearman = err_calculation(total_scaled_spearman, scaled_coef, 'mae')
+    
+    
+    
+    # rmse
+    rmse_err_mean = err_calculation(total_scaled_mean, scaled_coef, 'rmse')
+    rmse_err_median = err_calculation(total_scaled_median, scaled_coef, 'rmse')
+    rmse_err_mode = err_calculation(total_scaled_mode, scaled_coef, 'rmse')
+    rmse_err_box = err_calculation(total_scaled_box_whiskers, scaled_coef, 'rmse')
+    rmse_err_tau = err_calculation(total_scaled_tau_test, scaled_coef, 'rmse')
+    rmse_err_major = err_calculation(total_scaled_majority_vote, scaled_coef, 'rmse')
+    rmse_err_kendall = err_calculation(total_scaled_kendall_tau, scaled_coef, 'rmse')
+    rmse_err_spearman = err_calculation(total_scaled_spearman, scaled_coef, 'rmse')
+    
+    
+    err_type = 'MAE'
+    print(f" All {err_type} (mean): {err_mean}")
+    print(f" All {err_type} (median): {err_median}")
+    print(f" All {err_type} (mode): {err_mode}")
+    print(f" All {err_type} (box-whiskers): {err_box}")
+    print(f" All {err_type} (tau-test): {err_tau}")
+    print(f" All {err_type} (majority vote): {err_major}")
+    print(f" All {err_type} (Kendall tau): {err_kendall}")
+    print(f" All {err_type} (Spearman Rho): {err_spearman}")
+    print("")
+    print(f"PI MAE error: {(err_rf_pi+err_gb_pi+err_svr_pi+err_dnn_pi)/4}")
+    print(f"SV MAE error: {(err_rf_sv+err_gb_sv+err_svr_sv+err_dnn_sv)/4}")
+    print(f"IG MAE error: {err_dnn_ig}")
+    print("")
+    print("")
+    
+    err_type = 'RMSE'
+    print(f" All {err_type} (mean): {rmse_err_mean}")
+    print(f" All {err_type} (median): {rmse_err_median}")
+    print(f" All {err_type} (mode): {rmse_err_mode}")
+    print(f" All {err_type} (box-whiskers): {rmse_err_box}")
+    print(f" All {err_type} (tau-test): {rmse_err_tau}")
+    print(f" All {err_type} (majority vote): {rmse_err_major}")
+    print(f" All {err_type} (Kendall tau): {rmse_err_kendall}")
+    print(f" All {err_type} (Spearman Rho): {rmse_err_spearman}")
+    print("")
+    print(f"PI RMSE error: {(rmse_err_rf_pi+rmse_err_gb_pi+rmse_err_svr_pi+rmse_err_dnn_pi)/4}")
+    print(f"SV RMSE error: {(rmse_err_rf_sv+rmse_err_gb_sv+rmse_err_svr_sv+rmse_err_dnn_sv)/4}")
+    print(f"IG RMSE error: {rmse_err_dnn_ig}")
 
     # save result in csv
     methods = np.array(
@@ -580,7 +675,6 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
         [
             total_scaled_median,
             total_scaled_mean,
-            #         mi_scaled,
             total_scaled_box_whiskers,
             total_scaled_tau_test,
             total_scaled_majority_vote,
@@ -600,7 +694,7 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     )
 
 
-    df_results.to_csv(f"Tabular/results_{informative}_feat_{noise}_noise.csv")
+    #df_results.to_csv(f"Tabular/results_{informative}_feat_{noise}_noise.csv")
 
     fig = px.scatter(df_results, x="Features", y="Importance", color="Methods")
 
@@ -610,6 +704,11 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
 
     fig.update_traces(marker=dict(size=12, line=dict(width=2, color="Black")), selector=dict(mode="markers"), opacity=0.7)
 
-    fig.write_html(f"Images/scatter_results_{informative}_feat_{noise}_noise.html")
+    #fig.write_html(f"Images/scatter_results_{informative}_feat_{noise}_noise.html")
     fig.show()
     
+    mae_result = [rf_mae, gb_mae, svr_mae, dnn_mae, err_rf_pi, err_gb_pi,err_svr_pi, err_dnn_pi, err_rf_sv, err_gb_sv,err_svr_sv, err_dnn_sv, err_dnn_ig, err_mean, err_median, err_mode, err_box, err_tau, err_major, err_kendall, err_spearman]
+    
+    rmse_result = [rf_rmse, gb_rmse, svr_rmse, dnn_rmse, rmse_err_rf_pi, rmse_err_gb_pi,rmse_err_svr_pi, rmse_err_dnn_pi, rmse_err_rf_sv, rmse_err_gb_sv,rmse_err_svr_sv, rmse_err_dnn_sv, rmse_err_dnn_ig, rmse_err_mean, rmse_err_median, rmse_err_mode, rmse_err_box, rmse_err_tau, rmse_err_major, rmse_err_kendall, rmse_err_spearman]
+    
+    return [mae_result,rmse_result]
