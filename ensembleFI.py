@@ -85,7 +85,7 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     ###############################################################
     # fit random forest
     ###############################################################
-    rf_regr = RandomForestRegressor(max_depth=10, n_estimators=1000)
+    rf_regr = RandomForestRegressor(max_depth=70, n_estimators=1400, min_samples_split=2,min_samples_leaf=2,max_features='auto',bootstrap=True)
     rf_regr.fit(X_train, y_train)
     rf_predicted = rf_regr.predict(X_test)
     
@@ -96,12 +96,11 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     print(f"rf_mae:{rf_mae}")
     print(f"rf_rmse:{rf_rmse}")
     
-    
 
     ###############################################################
     # fit gradient boosted tree
     ###############################################################
-    gb_regr = GradientBoostingRegressor(max_depth=10, n_estimators=1000)
+    gb_regr = GradientBoostingRegressor(max_depth=50, n_estimators=1600, min_samples_split=2, min_samples_leaf=4, max_features='auto',loss='lad', learning_rate=0.1)
     gb_regr.fit(X_train, y_train)
     gb_predicted = gb_regr.predict(X_test)
     
@@ -131,6 +130,25 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     ################################################################
     # permutation importance for rf, gb, and svr
     ################################################################
+    
+    ###############################
+    # Train
+    ###############################
+    train_pi_result_rf = permutation_importance(rf_regr, X_train, y_train, n_repeats=10, scoring=mae_scorer)
+    train_pi_result_rf_scaled = normalise(train_pi_result_rf.importances_mean)
+    pos = np.arange(column_names.size)
+    
+    # permutation importance for gradient boosted tree
+    train_pi_result_gb = permutation_importance(gb_regr, X_train, y_train, n_repeats=10, scoring=mae_scorer)
+    train_pi_result_gb_scaled = normalise(train_pi_result_gb.importances_mean)
+    
+    # permutation importance for svr
+    train_pi_result_svr = permutation_importance(svr_regr, X_train, y_train, n_repeats=10, scoring=mae_scorer)
+    train_pi_result_svr_scaled = normalise(train_pi_result_svr.importances_mean)
+    
+    ###############################
+    # Test
+    ###############################
     pi_result_rf = permutation_importance(rf_regr, X_test, y_test, n_repeats=10, scoring=mae_scorer)
     pi_result_rf_scaled = normalise(pi_result_rf.importances_mean)
     pos = np.arange(column_names.size)
@@ -146,6 +164,28 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     ################################################################
     # SHAP for rf, gb, and svr
     ################################################################
+    
+    ###############################
+    # Train
+    ###############################
+    train_explainer_rf = shap.TreeExplainer(rf_regr)
+    train_shap_values_rf = train_explainer_rf.shap_values(X_train)
+
+    train_explainer_gb = shap.TreeExplainer(gb_regr)
+    train_shap_values_gb = train_explainer_gb.shap_values(X_train)
+    
+    
+    train_explainer_svr = shap.KernelExplainer(svr_regr.predict, data=shap.kmeans(X_train, 10))
+    train_shap_values_svr = train_explainer_svr.shap_values(X_train, nsamples=800, l1_reg=f"num_features({NUM_FEATS})")
+    
+
+    train_gb_sv_scaled = normalise(np.abs(train_shap_values_gb).mean(0))
+    train_rf_sv_scaled = normalise(np.abs(train_shap_values_rf).mean(0))
+    train_svr_sv_scaled = normalise(np.abs(train_shap_values_svr).mean(0))
+    
+    ###############################
+    # Test
+    ###############################
     explainer_rf = shap.TreeExplainer(rf_regr)
     shap_values_rf = explainer_rf.shap_values(X_test)
 
@@ -160,6 +200,7 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     gb_sv_scaled = normalise(np.abs(shap_values_gb).mean(0))
     rf_sv_scaled = normalise(np.abs(shap_values_rf).mean(0))
     svr_sv_scaled = normalise(np.abs(shap_values_svr).mean(0))
+    
     ############################################################################
     ## DNN
     ############################################################################
@@ -252,16 +293,28 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     dnn_rmse = np.sqrt(np.square(test_output - y_test).mean())
     print(f"dnn_mae: {dnn_mae}")
     print(f"dnn_rmse: {dnn_rmse}")
-    # Intergrated gradient
-    ig = IntegratedGradients(net)
-    test_input_tensor = torch.from_numpy(X_train).type(torch.FloatTensor)
-    test_input_tensor.requires_grad_()
-    attr, delta = ig.attribute(test_input_tensor, return_convergence_delta=True)
-    attr = attr.detach().numpy()
-
+    
+    ##########################################
+    # DNN Intergrated gradient
+    ##########################################
+    
+    
+    def dnn_ig(torch_net, X):
+        ig = IntegratedGradients(torch_net)
+        test_input_tensor = torch.from_numpy(X).type(torch.FloatTensor)
+        test_input_tensor.requires_grad_()
+        attr, delta = ig.attribute(test_input_tensor, return_convergence_delta=True)
+        attr = attr.detach().numpy()
+        ig_scaled = normalise(np.abs(np.mean(attr, axis=0)))
+        return ig_scaled
+    
+    
+    train_dnn_ig_scaled = dnn_ig(net, X_train)
+    dnn_ig_scaled = dnn_ig(net, X_test)
+    
+    ##########################################
+    
     feature_names = list(column_names)
-    dnn_ig_scaled = normalise(np.abs(np.mean(attr, axis=0)))
-
     def base_model():
         model = tf.keras.Sequential(
             [
@@ -300,17 +353,27 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     )
 
     history = dnn_model.fit(X_train, y_train)
-    perm = PermutationImportance(dnn_model, scoring=mae_scorer).fit(X_train, y_train)
-    dnn_pi_df = eli5.explain_weights_df(perm, feature_names=column_names.tolist())
-    dnn_pi_df['feature_cat'] = pd.Categorical(
-        dnn_pi_df['feature'], 
-        categories=column_names.tolist(), 
-        ordered=True)
-    dnn_pi_df.sort_values(by='feature_cat', inplace=True)
-    dnn_pi_df.drop(columns=['feature_cat'],inplace=True)
-    print(dnn_pi_df.head(20))
-    dnn_pi_scaled = normalise(dnn_pi_df["weight"].values)
     
+    ##########################################
+    # DNN PI
+    ##########################################
+    def dnn_pi(mdl, X, y):
+        perm = PermutationImportance(mdl, scoring=mae_scorer).fit(X, y)
+        pi_df = eli5.explain_weights_df(perm, feature_names=column_names.tolist())
+        pi_df['feature_cat'] = pd.Categorical(
+            pi_df['feature'], 
+            categories=column_names.tolist(), 
+            ordered=True)
+        pi_df.sort_values(by='feature_cat', inplace=True)
+        pi_df.drop(columns=['feature_cat'],inplace=True)
+        pi_scaled = normalise(pi_df["weight"].values)
+        return pi_scaled
+    
+    
+    train_dnn_pi_scaled = dnn_pi(dnn_model, X_train, y_train)
+    dnn_pi_scaled = dnn_pi(dnn_model, X_test, y_test)
+    
+    ##########################################
     
     model = tf.keras.Sequential(
         [
@@ -351,23 +414,39 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     # save keras model
     tf.keras.models.save_model(model, "dnn_model.h5")
     
-#     SHAP for DNN
-#     explainer_dnn = shap.KernelExplainer(model.predict, data=shap.kmeans(df_features.iloc[:300, :], 10))
-#     shap_values = explainer_dnn.shap_values(df_features.iloc[:300, :], nsamples=200, l1_reg=f"num_features({NUM_FEATS})")
-#     dnn_sv = np.sum(np.mean(np.abs(shap_values), axis=1), axis=0)
-#     dnn_sv_scaled = normalise(dnn_sv)
+    ######################################
+    # DNN SHAP
+    ######################################
+    def dnn_shap(mdl, X, samples):
+        explainer_dnn = shap.KernelExplainer(mdl.predict, data=shap.kmeans(X, 10))
+        shap_values = explainer_dnn.shap_values(X, nsamples=samples, l1_reg=f"num_features({NUM_FEATS})")
+        sv = np.sum(np.mean(np.abs(shap_values), axis=1), axis=0)
+        sv_scaled = normalise(sv)
+        return sv_scaled
     
+    train_dnn_sv_scaled = dnn_shap(model, X_train, 800)
+    dnn_sv_scaled = dnn_shap(model, X_test, 200)
     
-    explainer_dnn = shap.KernelExplainer(model.predict, data=shap.kmeans(X_test, 10))
-    shap_values = explainer_dnn.shap_values(X_test, nsamples=200, l1_reg=f"num_features({NUM_FEATS})")
-    dnn_sv = np.sum(np.mean(np.abs(shap_values), axis=1), axis=0)
-    dnn_sv_scaled = normalise(dnn_sv)
+    ######################################
     
+    # combine results into single array (train)
+    train_rf_sv_scaled_reshaped = np.reshape(train_rf_sv_scaled, (train_rf_sv_scaled.shape[0], 1))
+    train_pi_result_rf_scaled_reshaped = np.reshape(train_pi_result_rf_scaled, (train_pi_result_rf_scaled.shape[0], 1))
     
+    train_gb_sv_scaled_reshaped = np.reshape(train_gb_sv_scaled, (train_gb_sv_scaled.shape[0], 1))
+    train_pi_result_gb_scaled_reshaped = np.reshape(train_pi_result_gb_scaled, (train_pi_result_gb_scaled.shape[0], 1))
     
-    # combine results into single array
+    train_svr_sv_scaled_reshaped = np.reshape(train_svr_sv_scaled, (train_svr_sv_scaled.shape[0], 1))
+    train_pi_result_svr_scaled_reshaped = np.reshape(train_pi_result_svr_scaled, (train_pi_result_svr_scaled.shape[0], 1))
+    
+    train_dnn_pi_scaled_reshaped = np.reshape(train_dnn_pi_scaled, (train_dnn_pi_scaled.shape[0], 1))
+    train_dnn_sv_scaled_reshaped = np.reshape(train_dnn_sv_scaled, (train_dnn_sv_scaled.shape[0], 1))
+    train_dnn_ig_scaled_reshaped = np.reshape(train_dnn_ig_scaled, (train_dnn_ig_scaled.shape[0], 1))
+    
+    # combine results into single array (test)
     rf_sv_scaled_reshaped = np.reshape(rf_sv_scaled, (rf_sv_scaled.shape[0], 1))
     pi_result_rf_scaled_reshaped = np.reshape(pi_result_rf_scaled, (pi_result_rf_scaled.shape[0], 1))
+    
     gb_sv_scaled_reshaped = np.reshape(gb_sv_scaled, (gb_sv_scaled.shape[0], 1))
     pi_result_gb_scaled_reshaped = np.reshape(pi_result_gb_scaled, (pi_result_gb_scaled.shape[0], 1))
     
@@ -380,9 +459,27 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     
     def isNaN(num):
         return num != num
+    if isNaN(train_dnn_ig_scaled_reshaped.mean()) == True:
+        train_dnn_ig_scaled_reshaped = (train_dnn_pi_scaled_reshaped+train_dnn_sv_scaled_reshaped)/2
     if isNaN(dnn_ig_scaled_reshaped.mean()) == True:
         dnn_ig_scaled_reshaped = (dnn_pi_scaled_reshaped+dnn_sv_scaled_reshaped)/2
-
+    
+    # train
+    train_all_stacked = np.hstack(
+        (
+            train_rf_sv_scaled_reshaped,
+            train_pi_result_rf_scaled_reshaped,
+            train_gb_sv_scaled_reshaped,
+            train_pi_result_gb_scaled_reshaped,
+            train_svr_sv_scaled_reshaped,
+            train_pi_result_svr_scaled_reshaped,
+            train_dnn_pi_scaled_reshaped,
+            train_dnn_sv_scaled_reshaped,
+            train_dnn_ig_scaled_reshaped,
+        )
+    )
+    
+    # test
     all_stacked = np.hstack(
         (
             rf_sv_scaled_reshaped,
@@ -407,7 +504,104 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
             return np.abs(predicted - actual).mean()
         elif calc_type=='rmse':
             return np.sqrt(np.square(predicted - actual).mean())
-        
+        elif calc_type=='r2':
+            return r2_score(actual,predicted)
+    #####################################################################################
+    # TRAIN DATA
+    #####################################################################################
+    
+    
+    train_err_rf_pi = err_calculation(train_pi_result_rf_scaled, scaled_coef, 'mae')
+    train_err_gb_pi = err_calculation(train_pi_result_gb_scaled, scaled_coef, 'mae')
+    train_err_svr_pi = err_calculation(train_pi_result_svr_scaled, scaled_coef, 'mae')
+    train_err_dnn_pi = err_calculation(train_dnn_pi_scaled, scaled_coef, 'mae')
+    train_err_rf_sv = err_calculation(train_rf_sv_scaled, scaled_coef, 'mae')
+    train_err_gb_sv = err_calculation(train_gb_sv_scaled, scaled_coef, 'mae')
+    train_err_svr_sv = err_calculation(train_svr_sv_scaled, scaled_coef, 'mae')
+    train_err_dnn_sv = err_calculation(train_dnn_sv_scaled, scaled_coef, 'mae')
+    train_err_dnn_ig = err_calculation(train_dnn_ig_scaled, scaled_coef, 'mae')
+    
+    train_rmse_err_rf_pi = err_calculation(train_pi_result_rf_scaled, scaled_coef, 'rmse')
+    train_rmse_err_gb_pi = err_calculation(train_pi_result_gb_scaled, scaled_coef, 'rmse')
+    train_rmse_err_svr_pi = err_calculation(train_pi_result_svr_scaled, scaled_coef, 'rmse')
+    train_rmse_err_dnn_pi = err_calculation(train_dnn_pi_scaled, scaled_coef, 'rmse')
+    train_rmse_err_rf_sv = err_calculation(train_rf_sv_scaled, scaled_coef, 'rmse')
+    train_rmse_err_gb_sv = err_calculation(train_gb_sv_scaled, scaled_coef, 'rmse')
+    train_rmse_err_svr_sv = err_calculation(train_svr_sv_scaled, scaled_coef, 'rmse')
+    train_rmse_err_dnn_sv = err_calculation(train_dnn_sv_scaled, scaled_coef, 'rmse')
+    train_rmse_err_dnn_ig = err_calculation(train_dnn_ig_scaled, scaled_coef, 'rmse')
+    
+    train_r2_err_rf_pi = err_calculation(train_pi_result_rf_scaled, scaled_coef, 'r2')
+    train_r2_err_gb_pi = err_calculation(train_pi_result_gb_scaled, scaled_coef, 'r2')
+    train_r2_err_svr_pi = err_calculation(train_pi_result_svr_scaled, scaled_coef, 'r2')
+    train_r2_err_dnn_pi = err_calculation(train_dnn_pi_scaled, scaled_coef, 'r2')
+    train_r2_err_rf_sv = err_calculation(train_rf_sv_scaled, scaled_coef, 'r2')
+    train_r2_err_gb_sv = err_calculation(train_gb_sv_scaled, scaled_coef, 'r2')
+    train_r2_err_svr_sv = err_calculation(train_svr_sv_scaled, scaled_coef, 'r2')
+    train_r2_err_dnn_sv = err_calculation(train_dnn_sv_scaled, scaled_coef, 'r2')
+    train_r2_err_dnn_ig = err_calculation(train_dnn_ig_scaled, scaled_coef, 'r2')
+    
+    print('MAE train_ERROR:')
+    print(f"RF PI MAE train_error: {train_err_rf_pi}")
+    print(f"GB PI MAE train_error: {train_err_gb_pi}")
+    print(f"SVR PI MAE train_error: {train_err_svr_pi}")
+    print(f"DNN PI MAE train_error: {train_err_dnn_pi}")
+    print("")
+    print(f"RF SV MAE train_error: {train_err_rf_sv}")
+    print(f"GB SV MAE train_error: {train_err_gb_sv}")
+    print(f"SVR SV MAE train_error: {train_err_svr_sv}")
+    print(f"DNN SV MAE train_error: {train_err_dnn_sv}")
+    print(f"DNN IG MAE train_error: {train_err_dnn_ig}")
+    print("")
+    print(f"PI MAE train_error: {(train_err_rf_pi+train_err_gb_pi+train_err_svr_pi+train_err_dnn_pi)/4}")
+    print(f"SV MAE train_error: {(train_err_rf_sv+train_err_gb_sv+train_err_svr_sv+train_err_dnn_sv)/4}")
+    print(f"IG MAE train_error: {train_err_dnn_ig}")
+    print("")
+    print("")
+    
+    print('RMSE train_ERROR:')
+    print(f"RF PI RMSE train_error: {train_rmse_err_rf_pi}")
+    print(f"GB PI RMSE train_error: {train_rmse_err_gb_pi}")
+    print(f"SVR PI RMSE train_error: {train_rmse_err_svr_pi}")
+    print(f"DNN PI RMSE train_error: {train_rmse_err_dnn_pi}")
+    print("")
+    print(f"RF SV RMSE train_error: {train_rmse_err_rf_sv}")
+    print(f"GB SV RMSE train_error: {train_rmse_err_gb_sv}")
+    print(f"SVR SV RMSE train_error: {train_rmse_err_svr_sv}")
+    print(f"DNN SV RMSE train_error: {train_rmse_err_dnn_sv}")
+    print(f"DNN IG RMSE train_error: {train_rmse_err_dnn_ig}")
+    print("")
+    print(f"PI RMSE train_error: {(train_rmse_err_rf_pi+train_rmse_err_gb_pi+train_rmse_err_svr_pi+train_rmse_err_dnn_pi)/4}")
+    print(f"SV RMSE train_error: {(train_rmse_err_rf_sv+train_rmse_err_gb_sv+train_rmse_err_svr_sv+train_rmse_err_dnn_sv)/4}")
+    print(f"IG RMSE train_error: {train_rmse_err_dnn_ig}")
+    print("")
+    print("")
+    
+    print('R2 ERROR:')
+    print(f"RF PI R2 train_error: {train_r2_err_rf_pi}")
+    print(f"GB PI R2 train_error: {train_r2_err_gb_pi}")
+    print(f"SVR PI R2 train_error: {train_r2_err_svr_pi}")
+    print(f"DNN PI R2 train_error: {train_r2_err_dnn_pi}")
+    print("")
+    print(f"RF SV R2 train_error: {train_r2_err_rf_sv}")
+    print(f"GB SV R2 train_error: {train_r2_err_gb_sv}")
+    print(f"SVR SV R2 train_error: {train_r2_err_svr_sv}")
+    print(f"DNN SV R2 train_error: {train_r2_err_dnn_sv}")
+    print(f"DNN IG R2 train_error: {train_r2_err_dnn_ig}")
+    print("")
+    print(f"PI R2 train_error: {(train_r2_err_rf_pi+train_r2_err_gb_pi+train_r2_err_svr_pi+train_r2_err_dnn_pi)/4}")
+    print(f"SV R2 train_error: {(train_r2_err_rf_sv+train_r2_err_gb_sv+train_r2_err_svr_sv+train_r2_err_dnn_sv)/4}")
+    print(f"IG R2 train_error: {train_r2_err_dnn_ig}")
+    print("")
+    print("")
+    
+    #####################################################################################
+    #####################################################################################
+    
+    #####################################################################################
+    # TEST DATA
+    #####################################################################################
+    
     
     err_rf_pi = err_calculation(pi_result_rf_scaled, scaled_coef, 'mae')
     err_gb_pi = err_calculation(pi_result_gb_scaled, scaled_coef, 'mae')
@@ -428,6 +622,16 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     rmse_err_svr_sv = err_calculation(svr_sv_scaled, scaled_coef, 'rmse')
     rmse_err_dnn_sv = err_calculation(dnn_sv_scaled, scaled_coef, 'rmse')
     rmse_err_dnn_ig = err_calculation(dnn_ig_scaled, scaled_coef, 'rmse')
+    
+    r2_err_rf_pi = err_calculation(pi_result_rf_scaled, scaled_coef, 'r2')
+    r2_err_gb_pi = err_calculation(pi_result_gb_scaled, scaled_coef, 'r2')
+    r2_err_svr_pi = err_calculation(pi_result_svr_scaled, scaled_coef, 'r2')
+    r2_err_dnn_pi = err_calculation(dnn_pi_scaled, scaled_coef, 'r2')
+    r2_err_rf_sv = err_calculation(rf_sv_scaled, scaled_coef, 'r2')
+    r2_err_gb_sv = err_calculation(gb_sv_scaled, scaled_coef, 'r2')
+    r2_err_svr_sv = err_calculation(svr_sv_scaled, scaled_coef, 'r2')
+    r2_err_dnn_sv = err_calculation(dnn_sv_scaled, scaled_coef, 'r2')
+    r2_err_dnn_ig = err_calculation(dnn_ig_scaled, scaled_coef, 'r2')
     
     print('MAE ERROR:')
     print(f"RF PI MAE error: {err_rf_pi}")
@@ -465,26 +669,66 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     print("")
     print("")
     
+    print('R2 ERROR:')
+    print(f"RF PI R2 error: {r2_err_rf_pi}")
+    print(f"GB PI R2 error: {r2_err_gb_pi}")
+    print(f"SVR PI R2 error: {r2_err_svr_pi}")
+    print(f"DNN PI R2 error: {r2_err_dnn_pi}")
+    print("")
+    print(f"RF SV R2 error: {r2_err_rf_sv}")
+    print(f"GB SV R2 error: {r2_err_gb_sv}")
+    print(f"SVR SV R2 error: {r2_err_svr_sv}")
+    print(f"DNN SV R2 error: {r2_err_dnn_sv}")
+    print(f"DNN IG R2 error: {r2_err_dnn_ig}")
+    print("")
+    print(f"PI R2 error: {(r2_err_rf_pi+r2_err_gb_pi+r2_err_svr_pi+r2_err_dnn_pi)/4}")
+    print(f"SV R2 error: {(r2_err_rf_sv+r2_err_gb_sv+r2_err_svr_sv+r2_err_dnn_sv)/4}")
+    print(f"IG R2 error: {r2_err_dnn_ig}")
+    print("")
+    print("")
+    
+    #####################################################################################
+    #####################################################################################
+    
+    ###################################################################################################
     # median
+    ###################################################################################################
     total_scaled_median = np.median(all_stacked, axis=1)
-
+    train_total_scaled_median = np.median(train_all_stacked, axis=1)
+    
+    ###################################################################################################
+    
+    ###################################################################################################
     # mean 
+    ###################################################################################################
     total_scaled_mean = np.mean(all_stacked, axis=1)
-
+    train_total_scaled_mean = np.mean(train_all_stacked, axis=1)
+    ###################################################################################################
+    
+    ###################################################################################################
     # Box and whiskers
-    total_scaled_box_whiskers = np.array([])
-    for i in range(all_stacked.shape[0]):
-        temp_whiskers = np.array([])
-        q3 = np.quantile(all_stacked[i, :], 0.75)
-        q1 = np.quantile(all_stacked[i, :], 0.25)
-        upper_whiskers = q3 + (1.5 * (q3 - q1))
-        lower_whiskers = q1 - (1.5 * (q3 - q1))
-        for j in range(all_stacked[i, :].shape[0]):
-            if (all_stacked[i, :][j] >= lower_whiskers) and (all_stacked[i, :][j] <= upper_whiskers):
-                temp_whiskers = np.append(temp_whiskers, all_stacked[i, :][j])
-        total_scaled_box_whiskers = np.append(total_scaled_box_whiskers, temp_whiskers.mean())
-
+    ###################################################################################################
+    def BaW(stacked):
+        total_scaled_baw = np.array([])
+        for i in range(stacked.shape[0]):
+            temp_whiskers = np.array([])
+            q3 = np.quantile(stacked[i, :], 0.75)
+            q1 = np.quantile(stacked[i, :], 0.25)
+            upper_whiskers = q3 + (1.5 * (q3 - q1))
+            lower_whiskers = q1 - (1.5 * (q3 - q1))
+            for j in range(stacked[i, :].shape[0]):
+                if (stacked[i, :][j] >= lower_whiskers) and (stacked[i, :][j] <= upper_whiskers):
+                    temp_whiskers = np.append(temp_whiskers, stacked[i, :][j])
+            total_scaled_baw = np.append(total_scaled_baw, temp_whiskers.mean())
+        return total_scaled_baw
+    
+    total_scaled_box_whiskers = BaW(all_stacked)
+    train_total_scaled_box_whiskers = BaW(train_all_stacked)
+    ###################################################################################################
+    
+    ###################################################################################################
     # Thompson Tau
+    ###################################################################################################
     # (1) calculate sample mean
     # (2) calculate delta_min = |mean - min| and delta_max|mean - max|
     # (3) tau value from tau table value for sample size 7: 1.7110
@@ -492,8 +736,6 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     # (5) multiply tau with standard deviation = tau*std threshold
     # (6) compare (3) and (5)
     tau = 1.7110
-
-
     def tau_test(test_data):
         for i in range(test_data.shape[0]):
             test_data_mean = test_data.mean()
@@ -512,7 +754,7 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
                     test_data = np.delete(test_data, test_data_max_index)
         return test_data
 
-
+    # test
     total_scaled_tau_test = np.array([])
     for i in range(all_stacked.shape[0]):
         mean_tau = np.array([tau_test(all_stacked[i, :]).mean()])
@@ -520,9 +762,20 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
 
     total_scaled_tau_test = np.array([total_scaled_tau_test])
     total_scaled_tau_test = np.reshape(total_scaled_tau_test, (-1,))
+    #train
+    train_total_scaled_tau_test = np.array([])
+    for i in range(train_all_stacked.shape[0]):
+        train_mean_tau = np.array([tau_test(train_all_stacked[i, :]).mean()])
+        train_total_scaled_tau_test = np.append(train_total_scaled_tau_test, train_mean_tau)
 
+    train_total_scaled_tau_test = np.array([train_total_scaled_tau_test])
+    train_total_scaled_tau_test = np.reshape(train_total_scaled_tau_test, (-1,))
+    ###################################################################################################
+    
+    ###################################################################################################
     # Mode
-
+    ###################################################################################################
+    # test
     total_scaled_mode = np.array([])
     for i in range(all_stacked.shape[0]):
         params = stats.norm.fit(all_stacked[i, :])
@@ -533,16 +786,42 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
         total_scaled_mode = np.append(total_scaled_mode, minimize(your_density, 0).x[0])
 
     total_scaled_mode = np.reshape(total_scaled_mode, (-1,))
+    # train
+    train_total_scaled_mode = np.array([])
+    for i in range(train_all_stacked.shape[0]):
+        params = stats.norm.fit(train_all_stacked[i, :])
 
+        def your_density(x):
+            return -stats.norm.pdf(x, *params)
+
+        train_total_scaled_mode = np.append(train_total_scaled_mode, minimize(your_density, 0).x[0])
+        
+    train_total_scaled_mode = np.reshape(train_total_scaled_mode, (-1,))
+    ###################################################################################################
+    
+    ###################################################################################################
     # majority vote
+    ###################################################################################################
     total_scaled_majority_vote = majority_vote_func(all_stacked, NUM_FEATS)
+    train_total_scaled_majority_vote = majority_vote_func(train_all_stacked, NUM_FEATS)
+    ###################################################################################################
 
+    ###################################################################################################
     # kendall tau
+    ###################################################################################################
     columns_name = ["rf_sv", "rf_pi", "gb_sv", "gb_pi", "svr_sv", "svr_pi", "dnn_pi", "dnn_sv", "dnn_ig"]
     total_scaled_kendall_tau, kendall_tau_p_value, non_sig_ratio = helper_rank_func(stats.kendalltau, all_stacked, columns_name, NUM_FEATS)
-
+    
+    train_total_scaled_kendall_tau, train_kendall_tau_p_value, train_non_sig_ratio = helper_rank_func(stats.kendalltau, train_all_stacked, columns_name, NUM_FEATS)
+    ###################################################################################################
+    
+    ###################################################################################################
     # spearman
+    ###################################################################################################
     total_scaled_spearman, spearman_p_value, non_sig_ratio = helper_rank_func(stats.spearmanr, all_stacked, columns_name, NUM_FEATS)
+    
+    train_total_scaled_spearman, train_spearman_p_value, train_non_sig_ratio = helper_rank_func(stats.spearmanr, train_all_stacked, columns_name, NUM_FEATS)
+    ###################################################################################################
 
     # convert signifance to true or false
     def plot_rank_method_significance(p_value, rank_name, sig_threshold, columns_name):
@@ -570,12 +849,24 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
         #fig.show()
         fig.write_html(f"Images/{rank_name}_results_{informative}_feat_{noise}_noise.html")
 
-
+    print("Train Plot")
+    plot_rank_method_significance(train_kendall_tau_p_value, "Kendall Tau", 0.05, columns_name)
+    plot_rank_method_significance(train_spearman_p_value, "Spearman Rho", 0.05,columns_name)
+    print("Test Plot")
     plot_rank_method_significance(kendall_tau_p_value, "Kendall Tau", 0.05, columns_name)
     plot_rank_method_significance(spearman_p_value, "Spearman Rho", 0.05,columns_name)
-
-    # renormalise the result
-
+          
+    # renormalise the result (train)
+    train_total_scaled_median = normalise(train_total_scaled_median)
+    train_total_scaled_mean = normalise(train_total_scaled_mean)
+    train_total_scaled_mode = normalise(train_total_scaled_mode)
+    train_total_scaled_box_whiskers = normalise(train_total_scaled_box_whiskers)
+    train_total_scaled_tau_test = normalise(train_total_scaled_tau_test)
+    train_total_scaled_majority_vote = normalise(train_total_scaled_majority_vote)
+    train_total_scaled_kendall_tau = normalise(train_total_scaled_kendall_tau)
+    train_total_scaled_spearman = normalise(train_total_scaled_spearman)
+          
+    # renormalise the result (test)
     total_scaled_median = normalise(total_scaled_median)
     total_scaled_mean = normalise(total_scaled_mean)
     total_scaled_mode = normalise(total_scaled_mode)
@@ -611,9 +902,47 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     assert total_scaled_spearman.shape == (
         NUM_FEATS,
     ), f"Shape mismatch: Expect shape to be ({NUM_FEATS},) but receive {(total_scaled_spearman.shape)}"
-
-    # Print all final result
-    # mae 
+    
+     
+          
+          
+    ##############################################################################################
+    # Print all final result (train)
+    ##############################################################################################
+    # mae (train)
+    train_err_mean = err_calculation(train_total_scaled_mean, scaled_coef, 'mae')
+    train_err_median = err_calculation(train_total_scaled_median, scaled_coef, 'mae')
+    train_err_mode = err_calculation(train_total_scaled_mode, scaled_coef, 'mae')
+    train_err_box = err_calculation(train_total_scaled_box_whiskers, scaled_coef, 'mae')
+    train_err_tau = err_calculation(train_total_scaled_tau_test, scaled_coef, 'mae')
+    train_err_major = err_calculation(train_total_scaled_majority_vote, scaled_coef, 'mae')
+    train_err_kendall = err_calculation(train_total_scaled_kendall_tau, scaled_coef, 'mae')
+    train_err_spearman = err_calculation(train_total_scaled_spearman, scaled_coef, 'mae')
+    
+    # rmse (train)
+    train_rmse_err_mean = err_calculation(train_total_scaled_mean, scaled_coef, 'rmse')
+    train_rmse_err_median = err_calculation(train_total_scaled_median, scaled_coef, 'rmse')
+    train_rmse_err_mode = err_calculation(train_total_scaled_mode, scaled_coef, 'rmse')
+    train_rmse_err_box = err_calculation(train_total_scaled_box_whiskers, scaled_coef, 'rmse')
+    train_rmse_err_tau = err_calculation(train_total_scaled_tau_test, scaled_coef, 'rmse')
+    train_rmse_err_major = err_calculation(train_total_scaled_majority_vote, scaled_coef, 'rmse')
+    train_rmse_err_kendall = err_calculation(train_total_scaled_kendall_tau, scaled_coef, 'rmse')
+    train_rmse_err_spearman = err_calculation(train_total_scaled_spearman, scaled_coef, 'rmse')
+    
+    # r2 (train)
+    train_r2_err_mean = err_calculation(train_total_scaled_mean, scaled_coef, 'r2')
+    train_r2_err_median = err_calculation(train_total_scaled_median, scaled_coef, 'r2')
+    train_r2_err_mode = err_calculation(train_total_scaled_mode, scaled_coef, 'r2')
+    train_r2_err_box = err_calculation(train_total_scaled_box_whiskers, scaled_coef, 'r2')
+    train_r2_err_tau = err_calculation(train_total_scaled_tau_test, scaled_coef, 'r2')
+    train_r2_err_major = err_calculation(train_total_scaled_majority_vote, scaled_coef, 'r2')
+    train_r2_err_kendall = err_calculation(train_total_scaled_kendall_tau, scaled_coef, 'r2')
+    train_r2_err_spearman = err_calculation(train_total_scaled_spearman, scaled_coef, 'r2')
+          
+    ##############################################################################################
+    # Print all final result (test)
+    ##############################################################################################
+    # mae (test)
     err_mean = err_calculation(total_scaled_mean, scaled_coef, 'mae')
     err_median = err_calculation(total_scaled_median, scaled_coef, 'mae')
     err_mode = err_calculation(total_scaled_mode, scaled_coef, 'mae')
@@ -623,9 +952,7 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     err_kendall = err_calculation(total_scaled_kendall_tau, scaled_coef, 'mae')
     err_spearman = err_calculation(total_scaled_spearman, scaled_coef, 'mae')
     
-    
-    
-    # rmse
+    # rmse (test)
     rmse_err_mean = err_calculation(total_scaled_mean, scaled_coef, 'rmse')
     rmse_err_median = err_calculation(total_scaled_median, scaled_coef, 'rmse')
     rmse_err_mode = err_calculation(total_scaled_mode, scaled_coef, 'rmse')
@@ -635,38 +962,172 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     rmse_err_kendall = err_calculation(total_scaled_kendall_tau, scaled_coef, 'rmse')
     rmse_err_spearman = err_calculation(total_scaled_spearman, scaled_coef, 'rmse')
     
-    
+    # r2 (test)
+    r2_err_mean = err_calculation(total_scaled_mean, scaled_coef, 'r2')
+    r2_err_median = err_calculation(total_scaled_median, scaled_coef, 'r2')
+    r2_err_mode = err_calculation(total_scaled_mode, scaled_coef, 'r2')
+    r2_err_box = err_calculation(total_scaled_box_whiskers, scaled_coef, 'r2')
+    r2_err_tau = err_calculation(total_scaled_tau_test, scaled_coef, 'r2')
+    r2_err_major = err_calculation(total_scaled_majority_vote, scaled_coef, 'r2')
+    r2_err_kendall = err_calculation(total_scaled_kendall_tau, scaled_coef, 'r2')
+    r2_err_spearman = err_calculation(total_scaled_spearman, scaled_coef, 'r2')
+    ##############################################################################################
+          
+    ##############################################################################################
+    # Print all final result (train)
+    ##############################################################################################
     err_type = 'MAE'
-    print(f" All {err_type} (mean): {err_mean}")
-    print(f" All {err_type} (median): {err_median}")
-    print(f" All {err_type} (mode): {err_mode}")
-    print(f" All {err_type} (box-whiskers): {err_box}")
-    print(f" All {err_type} (tau-test): {err_tau}")
-    print(f" All {err_type} (majority vote): {err_major}")
-    print(f" All {err_type} (Kendall tau): {err_kendall}")
-    print(f" All {err_type} (Spearman Rho): {err_spearman}")
+    train_or_test = 'train'
+    print(f" All {train_or_test} {err_type} (mean): {train_err_mean}")
+    print(f" All {train_or_test} {err_type} (median): {train_err_median}")
+    print(f" All {train_or_test} {err_type} (mode): {train_err_mode}")
+    print(f" All {train_or_test} {err_type} (box-whiskers): {train_err_box}")
+    print(f" All {train_or_test} {err_type} (tau-test): {train_err_tau}")
+    print(f" All {train_or_test} {err_type} (majority vote): {train_err_major}")
+    print(f" All {train_or_test} {err_type} (Kendall tau): {train_err_kendall}")
+    print(f" All {train_or_test} {err_type} (Spearman Rho): {train_err_spearman}")
     print("")
-    print(f"PI MAE error: {(err_rf_pi+err_gb_pi+err_svr_pi+err_dnn_pi)/4}")
-    print(f"SV MAE error: {(err_rf_sv+err_gb_sv+err_svr_sv+err_dnn_sv)/4}")
-    print(f"IG MAE error: {err_dnn_ig}")
+    print(f"PI {train_or_test} {err_type}: {(train_err_rf_pi+train_err_gb_pi+train_err_svr_pi+train_err_dnn_pi)/4}")
+    print(f"SV {train_or_test} {err_type}: {(train_err_rf_sv+train_err_gb_sv+train_err_svr_sv+train_err_dnn_sv)/4}")
+    print(f"IG {train_or_test} {err_type}: {train_err_dnn_ig}")
     print("")
     print("")
     
     err_type = 'RMSE'
-    print(f" All {err_type} (mean): {rmse_err_mean}")
-    print(f" All {err_type} (median): {rmse_err_median}")
-    print(f" All {err_type} (mode): {rmse_err_mode}")
-    print(f" All {err_type} (box-whiskers): {rmse_err_box}")
-    print(f" All {err_type} (tau-test): {rmse_err_tau}")
-    print(f" All {err_type} (majority vote): {rmse_err_major}")
-    print(f" All {err_type} (Kendall tau): {rmse_err_kendall}")
-    print(f" All {err_type} (Spearman Rho): {rmse_err_spearman}")
+    print(f" All {train_or_test} {err_type} (mean): {train_rmse_err_mean}")
+    print(f" All {train_or_test} {err_type} (median): {train_rmse_err_median}")
+    print(f" All {train_or_test} {err_type} (mode): {train_rmse_err_mode}")
+    print(f" All {train_or_test} {err_type} (box-whiskers): {train_rmse_err_box}")
+    print(f" All {train_or_test} {err_type} (tau-test): {train_rmse_err_tau}")
+    print(f" All {train_or_test} {err_type} (majority vote): {train_rmse_err_major}")
+    print(f" All {train_or_test} {err_type} (Kendall tau): {train_rmse_err_kendall}")
+    print(f" All {train_or_test} {err_type} (Spearman Rho): {train_rmse_err_spearman}")
     print("")
-    print(f"PI RMSE error: {(rmse_err_rf_pi+rmse_err_gb_pi+rmse_err_svr_pi+rmse_err_dnn_pi)/4}")
-    print(f"SV RMSE error: {(rmse_err_rf_sv+rmse_err_gb_sv+rmse_err_svr_sv+rmse_err_dnn_sv)/4}")
-    print(f"IG RMSE error: {rmse_err_dnn_ig}")
+    print(f"PI {train_or_test} {err_type}: {(train_rmse_err_rf_pi+train_rmse_err_gb_pi+train_rmse_err_svr_pi+train_rmse_err_dnn_pi)/4}")
+    print(f"SV {train_or_test} {err_type}: {(train_rmse_err_rf_sv+train_rmse_err_gb_sv+train_rmse_err_svr_sv+train_rmse_err_dnn_sv)/4}")
+    print(f"IG {train_or_test} {err_type}: {train_rmse_err_dnn_ig}")
+    print("")
+    print("")
+    
+    err_type = 'R2'
+    print(f" All {train_or_test} {err_type} (mean): {train_r2_err_mean}")
+    print(f" All {train_or_test} {err_type} (median): {train_r2_err_median}")
+    print(f" All {train_or_test} {err_type} (mode): {train_r2_err_mode}")
+    print(f" All {train_or_test} {err_type} (box-whiskers): {train_r2_err_box}")
+    print(f" All {train_or_test} {err_type} (tau-test): {train_r2_err_tau}")
+    print(f" All {train_or_test} {err_type} (majority vote): {train_r2_err_major}")
+    print(f" All {train_or_test} {err_type} (Kendall tau): {train_r2_err_kendall}")
+    print(f" All {train_or_test} {err_type} (Spearman Rho): {train_r2_err_spearman}")
+    print("")
+    print(f"PI {train_or_test} {err_type}: {(train_r2_err_rf_pi+train_r2_err_gb_pi+train_r2_err_svr_pi+train_r2_err_dnn_pi)/4}")
+    print(f"SV {train_or_test} {err_type}: {(train_r2_err_rf_sv+train_err_gb_sv+train_r2_err_svr_sv+train_r2_err_dnn_sv)/4}")
+    print(f"IG {train_or_test} {err_type}: {train_r2_err_dnn_ig}")
+    print("")
+    print("")
+          
+    ##############################################################################################
+    
+    ##############################################################################################
+    # Print all final result (test)
+    ##############################################################################################
+    err_type = 'MAE'
+    train_or_test = 'test'
+    print(f" All {train_or_test} {err_type} (mean): {err_mean}")
+    print(f" All {train_or_test} {err_type} (median): {err_median}")
+    print(f" All {train_or_test} {err_type} (mode): {err_mode}")
+    print(f" All {train_or_test} {err_type} (box-whiskers): {err_box}")
+    print(f" All {train_or_test} {err_type} (tau-test): {err_tau}")
+    print(f" All {train_or_test} {err_type} (majority vote): {err_major}")
+    print(f" All {train_or_test} {err_type} (Kendall tau): {err_kendall}")
+    print(f" All {train_or_test} {err_type} (Spearman Rho): {err_spearman}")
+    print("")
+    print(f"PI {train_or_test} {err_type}: {(err_rf_pi+err_gb_pi+err_svr_pi+err_dnn_pi)/4}")
+    print(f"SV {train_or_test} {err_type}: {(err_rf_sv+err_gb_sv+err_svr_sv+err_dnn_sv)/4}")
+    print(f"IG {train_or_test} {err_type}: {err_dnn_ig}")
+    print("")
+    print("")
+    
+    err_type = 'RMSE'
+    print(f" All {train_or_test} {err_type} (mean): {rmse_err_mean}")
+    print(f" All {train_or_test} {err_type} (median): {rmse_err_median}")
+    print(f" All {train_or_test} {err_type} (mode): {rmse_err_mode}")
+    print(f" All {train_or_test} {err_type} (box-whiskers): {rmse_err_box}")
+    print(f" All {train_or_test} {err_type} (tau-test): {rmse_err_tau}")
+    print(f" All {train_or_test} {err_type} (majority vote): {rmse_err_major}")
+    print(f" All {train_or_test} {err_type} (Kendall tau): {rmse_err_kendall}")
+    print(f" All {train_or_test} {err_type} (Spearman Rho): {rmse_err_spearman}")
+    print("")
+    print(f"PI {train_or_test} {err_type}: {(rmse_err_rf_pi+rmse_err_gb_pi+rmse_err_svr_pi+rmse_err_dnn_pi)/4}")
+    print(f"SV {train_or_test} {err_type}: {(rmse_err_rf_sv+rmse_err_gb_sv+rmse_err_svr_sv+rmse_err_dnn_sv)/4}")
+    print(f"IG {train_or_test} {err_type}: {rmse_err_dnn_ig}")
+    print("")
+    print("")
+    
+    err_type = 'R2'
+    print(f" All {train_or_test} {err_type} (mean): {r2_err_mean}")
+    print(f" All {train_or_test} {err_type} (median): {r2_err_median}")
+    print(f" All {train_or_test} {err_type} (mode): {r2_err_mode}")
+    print(f" All {train_or_test} {err_type} (box-whiskers): {r2_err_box}")
+    print(f" All {train_or_test} {err_type} (tau-test): {r2_err_tau}")
+    print(f" All {train_or_test} {err_type} (majority vote): {r2_err_major}")
+    print(f" All {train_or_test} {err_type} (Kendall tau): {r2_err_kendall}")
+    print(f" All {train_or_test} {err_type} (Spearman Rho): {r2_err_spearman}")
+    print("")
+    print(f"PI {train_or_test} {err_type}: {(r2_err_rf_pi+r2_err_gb_pi+r2_err_svr_pi+r2_err_dnn_pi)/4}")
+    print(f"SV {train_or_test} {err_type}: {(r2_err_rf_sv+err_gb_sv+r2_err_svr_sv+r2_err_dnn_sv)/4}")
+    print(f"IG {train_or_test} {err_type}: {r2_err_dnn_ig}")
+    print("")
+    print("")
+          
+    ##############################################################################################
+          
+    ##############################################################################################
+    # display result in plots (train)
+    ##############################################################################################
+    methods = np.array(
+        ["Mode", "Median", "Mean", "Box-Whiskers", "Tau Test", "Majority Vote", "Kendall Tau", "Spearman Rho", "Actual"]
+    )
+    train_multiplied_importance = np.append(
+        [train_total_scaled_mode],
+        [
+            train_total_scaled_median,
+            train_total_scaled_mean,
+            train_total_scaled_box_whiskers,
+            train_total_scaled_tau_test,
+            train_total_scaled_majority_vote,
+            train_total_scaled_kendall_tau,
+            train_total_scaled_spearman,
+            scaled_coef,
+        ],
+    )
+    train_multiplied_feature = np.tile(feature_names, int(train_multiplied_importance.shape[0] / len(feature_names)))
+    train_multiplied_methods = np.repeat(
+        methods, int(train_multiplied_importance.shape[0] / methods.shape[0])
+    )  # for 9 different ensemble method
 
-    # save result in csv
+
+    train_df_results = pd.DataFrame(
+        {"Importance": train_multiplied_importance, "Features": train_multiplied_feature, "Methods": train_multiplied_methods}
+    )
+
+
+    #df_results.to_csv(f"Tabular/results_{informative}_feat_{noise}_noise.csv")
+
+    fig = px.scatter(train_df_results, x="Features", y="Importance", color="Methods")
+
+    fig.update_layout(
+        template="plotly_white", title="Feature importance of actual vs ensemble method (Train)", width=1500, height=800,
+    )
+
+    fig.update_traces(marker=dict(size=12, line=dict(width=2, color="Black")), selector=dict(mode="markers"), opacity=0.7)
+
+    #fig.write_html(f"Images/scatter_results_{informative}_feat_{noise}_noise.html")
+    fig.show()
+    ##############################################################################################
+          
+    ##############################################################################################
+    # display result in plots (test)
+    ##############################################################################################
     methods = np.array(
         ["Mode", "Median", "Mean", "Box-Whiskers", "Tau Test", "Majority Vote", "Kendall Tau", "Spearman Rho", "Actual"]
     )
@@ -699,16 +1160,26 @@ def ensemble_feature_importance(NUM_FEATS, features, output, coef, informative, 
     fig = px.scatter(df_results, x="Features", y="Importance", color="Methods")
 
     fig.update_layout(
-        template="plotly_white", title="Feature importance of actual vs ensemble method", width=1500, height=800,
+        template="plotly_white", title="Feature importance of actual vs ensemble method (Test)", width=1500, height=800,
     )
 
     fig.update_traces(marker=dict(size=12, line=dict(width=2, color="Black")), selector=dict(mode="markers"), opacity=0.7)
 
     #fig.write_html(f"Images/scatter_results_{informative}_feat_{noise}_noise.html")
     fig.show()
+    ##############################################################################################
+    
     
     mae_result = [rf_mae, gb_mae, svr_mae, dnn_mae, err_rf_pi, err_gb_pi,err_svr_pi, err_dnn_pi, err_rf_sv, err_gb_sv,err_svr_sv, err_dnn_sv, err_dnn_ig, err_mean, err_median, err_mode, err_box, err_tau, err_major, err_kendall, err_spearman]
     
     rmse_result = [rf_rmse, gb_rmse, svr_rmse, dnn_rmse, rmse_err_rf_pi, rmse_err_gb_pi,rmse_err_svr_pi, rmse_err_dnn_pi, rmse_err_rf_sv, rmse_err_gb_sv,rmse_err_svr_sv, rmse_err_dnn_sv, rmse_err_dnn_ig, rmse_err_mean, rmse_err_median, rmse_err_mode, rmse_err_box, rmse_err_tau, rmse_err_major, rmse_err_kendall, rmse_err_spearman]
     
-    return [mae_result,rmse_result]
+    r2_result = [r2_err_rf_pi, r2_err_gb_pi,r2_err_svr_pi, r2_err_dnn_pi, r2_err_rf_sv, r2_err_gb_sv,r2_err_svr_sv, r2_err_dnn_sv, r2_err_dnn_ig, r2_err_mean, r2_err_median, r2_err_mode, r2_err_box, r2_err_tau, r2_err_major, r2_err_kendall, r2_err_spearman]
+          
+    train_mae_result = [train_err_rf_pi, train_err_gb_pi,train_err_svr_pi, train_err_dnn_pi, train_err_rf_sv, train_err_gb_sv,train_err_svr_sv, train_err_dnn_sv, train_err_dnn_ig, train_err_mean, train_err_median, train_err_mode, train_err_box, train_err_tau, train_err_major, train_err_kendall, train_err_spearman]
+    
+    train_rmse_result = [train_rmse_err_rf_pi, train_rmse_err_gb_pi,train_rmse_err_svr_pi, train_rmse_err_dnn_pi, train_rmse_err_rf_sv, train_rmse_err_gb_sv,train_rmse_err_svr_sv, train_rmse_err_dnn_sv, train_rmse_err_dnn_ig, train_rmse_err_mean, train_rmse_err_median, train_rmse_err_mode, train_rmse_err_box, train_rmse_err_tau, train_rmse_err_major, train_rmse_err_kendall, train_rmse_err_spearman]
+    
+    train_r2_result = [train_r2_err_rf_pi, train_r2_err_gb_pi,train_r2_err_svr_pi, train_r2_err_dnn_pi, train_r2_err_rf_sv, train_r2_err_gb_sv,train_r2_err_svr_sv, train_r2_err_dnn_sv, train_r2_err_dnn_ig, train_r2_err_mean, train_r2_err_median, train_r2_err_mode, train_r2_err_box, train_r2_err_tau, train_r2_err_major, train_r2_err_kendall, train_r2_err_spearman]
+    
+    return [mae_result,rmse_result,r2_result, train_mae_result, train_rmse_result, train_r2_result]
